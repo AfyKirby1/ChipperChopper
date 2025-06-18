@@ -74,20 +74,19 @@ public class ChipperChopperClient implements ClientModInitializer {
                             new ConditionHasLineOfSight(),
                             new ActionMineBlock()
                         ),
-                        // 2. If not in mining range, move towards it.
-                        new Sequence(
-                            new ActionCalculatePathToTarget(),
-                            new ActionFollowPath()
-                        ),
-                        // 3. If we have a target but can't do anything, it's invalid.
-                        new ActionInvalidateTarget() // Fails if it can't move or mine
+                        // 2. If not in mining range, try to move towards it.
+                        new Selector( // Try different movement approaches
+                            new Sequence(
+                                new ActionCalculatePathToTarget(),
+                                new ActionFollowPath()
+                            ),
+                            // If pathfinding fails, invalidate target and try again
+                            new ActionInvalidateTarget()
+                        )
                     )
                 ),
                 // --- Find a new tree if we have no target ---
-                new Sequence(
-                    new ActionFindNewTree(),
-                    new ActionCalculatePathToTarget() // Pre-calculate path for the new tree
-                ),
+                new ActionFindNewTree(), // Removed path calculation from here
                 // --- If all else fails, do nothing ---
                 new ActionIdle()
             )
@@ -147,7 +146,7 @@ public class ChipperChopperClient implements ClientModInitializer {
 
     private void updateHUD(MinecraftClient client) {
         hudMessages.clear();
-        hudMessages.add("§b§lAgent.Lumber v2.0 (Advanced + Intelligence)§r");
+        hudMessages.add("§b§lAgent.Lumber v2.6.1 (Advanced + Intelligence)§r");
         hudMessages.add("§7═════════════════════════════");
         hudMessages.add(aiContext.isActive() ? "§a● §lSTATUS: ACTIVE" : "§c● §lSTATUS: INACTIVE");
         hudMessages.add(String.format("§e§lSTATE: §r§f%s", aiContext.getCurrentState()));
@@ -170,6 +169,25 @@ public class ChipperChopperClient implements ClientModInitializer {
                  hudMessages.add("§3§lPATH: §r§eIdle or Calculating");
             }
             
+            // NEW: Display behavior tree debugging info
+            hudMessages.add("");
+            hudMessages.add("§d§lBEHAVIOR TREE DEBUG:§r");
+            
+            // Show current behavior tree decision
+            String btDecision = "Unknown";
+            if (aiContext.getTargetTreePos() != null) {
+                if (aiContext.getAStarPath() != null && !aiContext.getAStarPath().isEmpty()) {
+                    btDecision = "Following Path";
+                } else if (aiContext.getCurrentMiningTarget() != null) {
+                    btDecision = "Mining Target";
+                } else {
+                    btDecision = "Calculating Path";
+                }
+            } else {
+                btDecision = "Finding Tree";
+            }
+            hudMessages.add(String.format("§7BT Decision: §f%s", btDecision));
+            
             // NEW: Display server intelligence information
             hudMessages.add("");
             hudMessages.add("§d§lSERVER INTELLIGENCE:§r");
@@ -188,6 +206,19 @@ public class ChipperChopperClient implements ClientModInitializer {
             }
             if (TreeChopperAI.isClearingLeaves(client.player)) {
                 hudMessages.add("§a🌿 Server is clearing leaves");
+            }
+            
+            // Show server target status
+            try {
+                Vec3d serverTarget = TreeChopperAI.getActiveTarget(client.player);
+                if (serverTarget != null) {
+                    BlockPos serverPos = BlockPos.ofFloored(serverTarget);
+                    hudMessages.add(String.format("§7Server Target: §f(%d, %d, %d)", serverPos.getX(), serverPos.getY(), serverPos.getZ()));
+                } else {
+                    hudMessages.add("§7Server Target: §cNone");
+                }
+            } catch (Exception e) {
+                hudMessages.add("§7Server Target: §cError");
             }
         }
         hudMessages.add("§7═════════════════════════════");
@@ -237,10 +268,16 @@ class AIContext {
             this.currentState = "Initializing...";
             this.lastPosition = client.player.getPos();
             client.player.sendMessage(Text.literal("§aChipper Chopper AI Activated."), true);
+            
+            // SYNC: Start server-side AI when client AI is activated
+            client.player.networkHandler.sendCommand("chipper start");
         } else {
             this.currentState = "Inactive";
             reset();
             client.player.sendMessage(Text.literal("§cChipper Chopper AI Deactivated."), true);
+            
+            // SYNC: Stop server-side AI when client AI is deactivated
+            client.player.networkHandler.sendCommand("chipper stop");
         }
     }
 
@@ -437,15 +474,42 @@ class ConditionIsStuck implements BTNode {
 
 // NEW: Condition to check if server intelligence recommends emergency action
 class ConditionServerEmergency implements BTNode {
+    private static long lastEmergencyTime = 0;
+    private static final long EMERGENCY_COOLDOWN = 2000; // 2 second cooldown
+    
     @Override
     public BTStatus tick(MinecraftClient client, AIContext context) {
+        // Don't trigger emergency too frequently
+        long currentTime = System.currentTimeMillis();
+        if (currentTime - lastEmergencyTime < EMERGENCY_COOLDOWN) {
+            return BTStatus.FAILURE;
+        }
+        
+        // Only check for server emergency if we're actually trying to do something
+        if (context.getTargetTreePos() == null) {
+            return BTStatus.FAILURE; // No point in emergency mode if we have no target anyway
+        }
+        
         // Check if server is in emergency mode or has recommended abandoning current target
         Vec3d serverTarget = TreeChopperAI.getActiveTarget(client.player);
         BlockPos currentTarget = context.getTargetTreePos();
         
         // If we have a target but server doesn't, server may have abandoned it
+        // BUT only trigger if we've been trying for a while
         if (currentTarget != null && serverTarget == null) {
+            // Check if server is actually inactive or just temporarily without target
+            try {
+                if (!TreeChopperAI.isActive(client.player)) {
+                    // Server AI is actually off - this is expected, not an emergency
+                    return BTStatus.FAILURE;
+                }
+            } catch (Exception e) {
+                // If we can't check server state, be conservative
+                return BTStatus.FAILURE;
+            }
+            
             context.setCurrentState("Server intelligence recommends target abandonment");
+            lastEmergencyTime = currentTime;
             return BTStatus.SUCCESS;
         }
         
@@ -455,6 +519,7 @@ class ConditionServerEmergency implements BTNode {
             if (!serverTreePos.equals(currentTarget) && 
                 currentTarget.getSquaredDistance(serverTreePos) > 100) { // More than 10 blocks difference
                 context.setCurrentState("Server intelligence found better target");
+                lastEmergencyTime = currentTime;
                 return BTStatus.SUCCESS;
             }
         }
@@ -478,9 +543,20 @@ class ActionIdle implements BTNode {
 }
 
 class ActionFindNewTree implements BTNode {
+    private static long lastSearchTime = 0;
+    private static final long SEARCH_COOLDOWN = 1000; // 1 second cooldown between searches
+    
     @Override
     public BTStatus tick(MinecraftClient client, AIContext context) {
+        // Don't search too frequently
+        long currentTime = System.currentTimeMillis();
+        if (currentTime - lastSearchTime < SEARCH_COOLDOWN) {
+            context.setCurrentState("Waiting before next tree search...");
+            return BTStatus.FAILURE; // Wait before searching again
+        }
+        
         context.setCurrentState("Scanning for new tree...");
+        lastSearchTime = currentTime;
         
         // NEW: Get target from server-side intelligence system
         Vec3d serverTarget = TreeChopperAI.getActiveTarget(client.player);
@@ -515,8 +591,19 @@ class ActionFindNewTree implements BTNode {
 }
 
 class ActionInvalidateTarget implements BTNode {
+    private static long lastInvalidationTime = 0;
+    private static final long INVALIDATION_COOLDOWN = 500; // 0.5 second cooldown
+    
     @Override
     public BTStatus tick(MinecraftClient client, AIContext context) {
+        // Don't invalidate too frequently
+        long currentTime = System.currentTimeMillis();
+        if (currentTime - lastInvalidationTime < INVALIDATION_COOLDOWN) {
+            context.setCurrentState("Delaying target invalidation...");
+            return BTStatus.RUNNING; // Keep trying for a bit
+        }
+        
+        lastInvalidationTime = currentTime;
         context.setCurrentState("Target is unreachable or invalid. Finding new target.");
         context.reset(); // Clear target, path, etc.
         return BTStatus.SUCCESS;
@@ -532,11 +619,12 @@ class ActionCalculatePathToTarget implements BTNode {
         BlockPos start = client.player.getBlockPos();
         BlockPos end = context.getTargetTreePos();
 
-        // Find a safe spot near the tree to stand on
+        // Try to find a safe spot near the tree to stand on
         BlockPos destination = findSafeStandableSpot(client, end);
         if (destination == null) {
-            context.setCurrentState("Could not find safe spot near tree.");
-            return BTStatus.FAILURE;
+            // Fallback: Try to path directly to the tree base
+            destination = end;
+            context.setCurrentState("No safe spot found, trying direct approach...");
         }
 
         AStarPathfinder pathfinder = new AStarPathfinder(1000); // Limit search to 1000 nodes
@@ -547,29 +635,83 @@ class ActionCalculatePathToTarget implements BTNode {
             context.setCurrentState("Path calculated. Moving...");
             return BTStatus.SUCCESS;
         } else {
-            context.setCurrentState("Pathfinding failed.");
-            context.setAStarPath(null);
-            return BTStatus.FAILURE;
+            // Fallback: If pathfinding fails, just try to move directly
+            List<BlockPos> directPath = createDirectPath(start, destination);
+            if (directPath != null && !directPath.isEmpty()) {
+                context.setAStarPath(directPath);
+                context.setCurrentState("Using direct path approach...");
+                return BTStatus.SUCCESS;
+            } else {
+                context.setCurrentState("All pathfinding attempts failed.");
+                context.setAStarPath(null);
+                return BTStatus.FAILURE;
+            }
         }
     }
 
     private BlockPos findSafeStandableSpot(MinecraftClient client, BlockPos treeBase) {
-        for (int r = 1; r < 5; r++) { // Check in increasing radius
+        // First try original method
+        for (int r = 1; r < 8; r++) { // Increased search radius
             for (int dx = -r; dx <= r; dx++) {
                 for (int dz = -r; dz <= r; dz++) {
                     if (Math.abs(dx) != r && Math.abs(dz) != r) continue; // Only check the perimeter of the radius
                     
                     BlockPos candidate = treeBase.add(dx, 0, dz);
-                    // A spot is "safe" if the block is solid and the two blocks above are air
-                    if(client.world.getBlockState(candidate.down()).isSolid() && 
-                       client.world.getBlockState(candidate).isAir() && 
-                       client.world.getBlockState(candidate.up()).isAir()) {
+                    if (isSafePosition(client, candidate)) {
+                        return candidate;
+                    }
+                    
+                    // Also try one block up and down
+                    if (isSafePosition(client, candidate.up())) {
+                        return candidate.up();
+                    }
+                    if (isSafePosition(client, candidate.down())) {
                         return candidate.down();
                     }
                 }
             }
         }
-        return null; // No safe spot found
+        
+        // Fallback: Just return the tree base if nothing else works
+        return treeBase;
+    }
+    
+    private boolean isSafePosition(MinecraftClient client, BlockPos pos) {
+        // More lenient safety check
+        try {
+            BlockState ground = client.world.getBlockState(pos.down());
+            BlockState feet = client.world.getBlockState(pos);
+            BlockState head = client.world.getBlockState(pos.up());
+            
+            // Must have solid ground and space for player
+            return ground.isSolid() && !feet.isSolid() && !head.isSolid();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+    
+    private List<BlockPos> createDirectPath(BlockPos start, BlockPos end) {
+        List<BlockPos> path = new ArrayList<>();
+        
+        // Simple direct line path as last resort
+        int dx = end.getX() - start.getX();
+        int dz = end.getZ() - start.getZ();
+        int steps = Math.max(Math.abs(dx), Math.abs(dz));
+        
+        if (steps == 0) {
+            path.add(end);
+            return path;
+        }
+        
+        for (int i = 1; i <= steps; i++) {
+            int x = start.getX() + (dx * i / steps);
+            int z = start.getZ() + (dz * i / steps);
+            int y = start.getY(); // Keep same Y level initially
+            path.add(new BlockPos(x, y, z));
+        }
+        
+        path.add(end); // Ensure we end at the target
+        return path;
     }
 }
 
@@ -723,6 +865,18 @@ class ActionResolveStuck implements BTNode {
 class ActionFollowServerIntelligence implements BTNode {
     @Override
     public BTStatus tick(MinecraftClient client, AIContext context) {
+        // First check if server AI is actually active
+        try {
+            if (!TreeChopperAI.isActive(client.player)) {
+                // Server AI is off, so ignore any stale server recommendations
+                context.setCurrentState("Server AI is inactive, proceeding with client logic");
+                return BTStatus.FAILURE; // Let other behavior tree nodes handle this
+            }
+        } catch (Exception e) {
+            // If we can't check server state, be conservative and proceed with client logic
+            return BTStatus.FAILURE;
+        }
+        
         Vec3d serverTarget = TreeChopperAI.getActiveTarget(client.player);
         
         if (serverTarget != null) {

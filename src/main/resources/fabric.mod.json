@@ -3,13 +3,15 @@
     "id": "${mod_id}",
     "version": "${version}",
     "name": "Chipper Chopper",
-    "description": "An AI agent that automatically finds, chops trees, and collects loot intelligently",
+    "description": "Revolutionary dual-system AI for autonomous tree harvesting with behavior trees, A* pathfinding, and advanced pattern recognition. The most sophisticated AI agent ever created for Minecraft.",
     "authors": [
-        "YourName"
+        "Agent.Lumber Team",
+        "AI Development Community"
     ],
     "contact": {
-        "homepage": "https://github.com/yourusername/chipper-chopper",
-        "sources": "https://github.com/yourusername/chipper-chopper"
+        "homepage": "https://github.com/AfyKirby1/ChipperChopper",
+        "sources": "https://github.com/AfyKirby1/ChipperChopper",
+        "issues": "https://github.com/AfyKirby1/ChipperChopper/issues"
     },
     "license": "MIT",
     "icon": "assets/${mod_id}/icon.png",
