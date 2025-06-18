@@ -1,0 +1,68 @@
+# Gradle files
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+!gradlew
+!gradlew.bat
+
+# IDE files
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.project
+.settings/
+.classpath
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Runtime files
+run/
+logs/
+*.log
+
+# Fabric specific
+remappedSrc/
+.fabric/
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# Build outputs
+out/
+target/
+bin/
+
+# Temporary files
+*.tmp
+*.temp
+*~
+.cache/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Minecraft development
+minecraft/
+.minecraft/
+saves/
+screenshots/
+config/
+mods/
+resourcepacks/
+crash-reports/
+
+# Local Gradle properties
+gradle.properties.local 

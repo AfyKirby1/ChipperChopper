@@ -1,0 +1,37 @@
+{
+    "schemaVersion": 1,
+    "id": "${mod_id}",
+    "version": "${version}",
+    "name": "Chipper Chopper",
+    "description": "An AI agent that automatically finds, chops trees, and collects loot intelligently",
+    "authors": [
+        "YourName"
+    ],
+    "contact": {
+        "homepage": "https://github.com/yourusername/chipper-chopper",
+        "sources": "https://github.com/yourusername/chipper-chopper"
+    },
+    "license": "MIT",
+    "icon": "assets/${mod_id}/icon.png",
+    "environment": "*",
+    "entrypoints": {
+        "main": [
+            "com.example.chipper_chopper.ChipperChopperMod"
+        ],
+        "client": [
+            "com.example.chipper_chopper.ChipperChopperClient"
+        ]
+    },
+    "mixins": [
+        "${mod_id}.mixins.json"
+    ],
+    "depends": {
+        "fabricloader": ">=${loader_version}",
+        "minecraft": "~${minecraft_version}",
+        "java": ">=21",
+        "fabric-api": "*"
+    },
+    "suggests": {
+        "another-mod": "*"
+    }
+} 
