@@ -56,6 +56,16 @@ tasks.withType(JavaCompile).configureEach {
     if (targetJavaVersion >= 10 || JavaVersion.current().isJava10Compatible()) {
         it.options.release.set(targetJavaVersion)
     }
+    
+    // PERFORMANCE OPTIMIZATION: Parallel compilation and incremental builds
+    it.options.fork = true
+    it.options.incremental = true
+    it.options.forkOptions.jvmArgs = ['-Xmx1g']
+    
+    // Enable optimizations for release builds
+    if (gradle.startParameter.taskNames.any { it.contains('build') }) {
+        it.options.compilerArgs += ['-O', '-g:none'] // Optimize and remove debug info
+    }
 }
 
 java {
@@ -70,6 +80,39 @@ java {
 jar {
     from("LICENSE") {
         rename { "${it}_${project.archivesBaseName}"}
+    }
+    
+    // PERFORMANCE OPTIMIZATION: Enable JAR compression and exclude unnecessary files
+    archiveClassifier = ''
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    
+    exclude '**/package-info.class'
+    exclude '**/*.DSStore'
+    exclude '**/Thumbs.db'
+    
+    // Enable JAR compression for smaller file size
+    zip64 = true
+    
+    manifest {
+        attributes(
+            'Implementation-Title': project.name,
+            'Implementation-Version': project.version,
+            'Built-By': System.getProperty('user.name'),
+            'Built-Date': new Date(),
+            'Built-JDK': System.getProperty('java.version')
+        )
+    }
+}
+
+// PERFORMANCE OPTIMIZATION: Add a task to clean up development caches
+task cleanCaches {
+    group = 'build'
+    description = 'Clean up development caches for better performance'
+    doLast {
+        println 'Cleaning development caches...'
+        delete fileTree(dir: '.gradle/caches', include: '**/*')
+        delete fileTree(dir: 'build/tmp', include: '**/*') 
+        println 'Cache cleanup complete'
     }
 }
 

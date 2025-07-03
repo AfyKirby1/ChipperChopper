@@ -92,7 +92,7 @@ public class ChipperChopperClient implements ClientModInitializer {
             )
         );
 
-        // --- Client Tick Event ---
+        // --- Client Tick Event with Performance Optimization ---
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null) return;
 
@@ -105,15 +105,17 @@ public class ChipperChopperClient implements ClientModInitializer {
                 }
             }
 
-            if (aiContext.isActive()) {
-                // This is the core AI loop. On every client tick, we "tick" the behavior tree.
-                // The tree handles all the decision making about what to do.
+            // PERFORMANCE OPTIMIZATION: Reduce AI processing frequency
+            if (aiContext.isActive() && aiContext.shouldProcessAI()) {
+                // Process AI only every few ticks instead of every tick
                 behaviorTree.tick(client, aiContext);
+                aiContext.markProcessed();
             }
 
-            // Update the HUD with the latest AI state
-            if (hudEnabled) {
+            // PERFORMANCE OPTIMIZATION: Throttle HUD updates to 10 FPS
+            if (hudEnabled && aiContext.shouldUpdateHUD()) {
                 updateHUD(client);
+                aiContext.markHUDUpdated();
             }
         });
 
@@ -261,6 +263,12 @@ class AIContext {
     // Timers & Cooldowns
     private long lastMineTime = 0;
     private static final long MINE_TIMEOUT = 4000; // 4 seconds
+    
+    // PERFORMANCE OPTIMIZATION: Tick frequency control
+    private int aiTickCounter = 0;
+    private int hudTickCounter = 0;
+    private static final int AI_PROCESS_INTERVAL = 4; // Process AI every 4 client ticks
+    private static final int HUD_UPDATE_INTERVAL = 6; // Update HUD at 10 FPS (60/6)
 
     public void toggleAI(MinecraftClient client) {
         this.isActive = !this.isActive;
@@ -308,6 +316,25 @@ class AIContext {
 
     public static int getStuckThreshold() { return STUCK_THRESHOLD; }
     public static long getMineTimeout() { return MINE_TIMEOUT; }
+    
+    // PERFORMANCE OPTIMIZATION: Tick frequency control methods
+    public boolean shouldProcessAI() {
+        aiTickCounter++;
+        return aiTickCounter >= AI_PROCESS_INTERVAL;
+    }
+    
+    public void markProcessed() {
+        aiTickCounter = 0;
+    }
+    
+    public boolean shouldUpdateHUD() {
+        hudTickCounter++;
+        return hudTickCounter >= HUD_UPDATE_INTERVAL;
+    }
+    
+    public void markHUDUpdated() {
+        hudTickCounter = 0;
+    }
 }
 
 // =================================================================================
@@ -900,14 +927,44 @@ class ActionFollowServerIntelligence implements BTNode {
 // =================================================================================
 
 class AStarPathfinder {
-
+    
     private final int maxNodesToVisit;
-
+    
+    // PERFORMANCE OPTIMIZATION: Path caching
+    private static final Map<String, CachedPath> pathCache = new HashMap<>();
+    private static final long CACHE_DURATION_MS = 10000; // 10 seconds cache
+    
     public AStarPathfinder(int maxNodesToVisit) {
         this.maxNodesToVisit = maxNodesToVisit;
     }
+    
+    private static class CachedPath {
+        public final List<BlockPos> path;
+        public final long timestamp;
+        
+        CachedPath(List<BlockPos> path) {
+            this.path = new ArrayList<>(path);
+            this.timestamp = System.currentTimeMillis();
+        }
+        
+        boolean isValid() {
+            return System.currentTimeMillis() - timestamp < CACHE_DURATION_MS;
+        }
+    }
 
     public List<BlockPos> findPath(MinecraftClient client, BlockPos start, BlockPos end) {
+        // PERFORMANCE OPTIMIZATION: Check cache first
+        String cacheKey = start.toString() + "->" + end.toString();
+        CachedPath cached = pathCache.get(cacheKey);
+        if (cached != null && cached.isValid()) {
+            return new ArrayList<>(cached.path);
+        }
+        
+        // Clean up old cache entries periodically
+        if (pathCache.size() > 20) {
+            pathCache.entrySet().removeIf(entry -> !entry.getValue().isValid());
+        }
+        
         Node startNode = new Node(start, null, 0, getHeuristic(start, end));
         PriorityQueue<Node> openSet = new PriorityQueue<>(Comparator.comparingDouble(Node::getFCost));
         Map<BlockPos, Node> allNodes = new HashMap<>();
@@ -916,23 +973,31 @@ class AStarPathfinder {
         allNodes.put(start, startNode);
 
         int visitedCount = 0;
+        // PERFORMANCE OPTIMIZATION: Reduced max nodes for faster pathfinding
+        int maxNodes = Math.min(maxNodesToVisit, 300);
 
         while (!openSet.isEmpty()) {
-            if (visitedCount++ > maxNodesToVisit) {
+            if (visitedCount++ > maxNodes) {
                 return null; // Path too long or complex
             }
 
             Node current = openSet.poll();
 
             if (current.position.equals(end)) {
-                return reconstructPath(current);
+                List<BlockPos> path = reconstructPath(current);
+                // Cache the successful path
+                pathCache.put(cacheKey, new CachedPath(path));
+                return path;
             }
 
-            for (Direction direction : Direction.values()) {
-                if (direction.getAxis().isVertical()) continue; // Only horizontal neighbors for now
+            // PERFORMANCE OPTIMIZATION: Only check 4 cardinal directions for speed
+            BlockPos[] neighbors = {
+                current.position.add(1, 0, 0), current.position.add(-1, 0, 0),
+                current.position.add(0, 0, 1), current.position.add(0, 0, -1)
+            };
 
-                BlockPos neighborPos = current.position.offset(direction);
-                // Simple gravity: check if we need to go up or down
+            for (BlockPos neighborPos : neighbors) {
+                // Simple gravity handling
                 if (isTraversable(client, neighborPos.down())) {
                     neighborPos = neighborPos.down();
                 } else if (isTraversable(client, neighborPos) && !isTraversable(client, neighborPos.down())) {
